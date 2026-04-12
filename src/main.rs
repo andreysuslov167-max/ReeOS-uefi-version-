@@ -29,7 +29,7 @@ fn panic(_info: &PanicInfo) -> ! {
 
 #[entry]
 fn main(_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
-    // Инициализация кучи
+  
     {
         let bs = system_table.boot_services();
         let heap_size = 1024 * 1024;
@@ -65,7 +65,7 @@ fn main(_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
                     let u16_val: u16 = c16.into();
                     
                     match u16_val {
-                        0x000D => { // Enter
+                        0x000D => { 
                             writeln!(system_table.stdout()).unwrap();
                             
                             match input_buffer.trim() {
@@ -91,26 +91,26 @@ fn main(_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
                             input_buffer.clear();
                             write!(system_table.stdout(), "> ").unwrap();
                         }
-                        0x0008 => { // Backspace
+                        0x0008 => {
                             if !input_buffer.is_empty() {
                                 input_buffer.pop();
                                 write!(system_table.stdout(), "\x08 \x08").unwrap();
                             }
                         }
                         _ => {
-                            // Только печатаемые ASCII символы (пробел и выше)
+                           
                             if u16_val >= 0x20 && u16_val < 0x7F {
                                 if let Some(c) = char::from_u32(u16_val as u32) {
                                     input_buffer.push(c);
                                     write!(system_table.stdout(), "{}", c).unwrap();
                                 }
                             }
-                            // Всё остальное (включая ESC и стрелки) игнорируем
+                           
                         }
                     }
                 }
                 Key::Special(_) => {
-                    // Полностью игнорируем все специальные клавиши
+                   
                 }
             }
         }
