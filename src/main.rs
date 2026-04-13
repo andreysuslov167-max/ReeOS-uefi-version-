@@ -60,7 +60,7 @@ mod ramfs {
             root.children.insert(String::from("README.TXT"), readme);
             
             let mut hello = File::new_file("HELLO.TXT");
-            hello.content = b"Hello, World!\n".to_vec();
+            hello.content = b"Hello World!\n".to_vec();
             root.children.insert(String::from("HELLO.TXT"), hello);
             
             let docs = File::new_dir("DOCS");
