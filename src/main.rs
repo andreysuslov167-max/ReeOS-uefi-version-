@@ -7,168 +7,13 @@ extern crate alloc;
 use uefi::prelude::*;
 use uefi::table::boot::{AllocateType, MemoryType};
 use uefi::proto::console::text::Key;
+use uefi::proto::console::gop::GraphicsOutput;
 use core::fmt::Write;
 use core::panic::PanicInfo;
 use linked_list_allocator::LockedHeap;
 use alloc::string::String;
-use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-
-mod ramfs {
-    use alloc::collections::BTreeMap;
-    use alloc::string::String;
-    use alloc::vec::Vec;
-
-    #[derive(Clone)]
-    pub struct File {
-        pub name: String,
-        pub content: Vec<u8>,
-        pub is_dir: bool,
-        pub children: BTreeMap<String, File>,
-    }
-
-    impl File {
-        pub fn new_file(name: &str) -> Self {
-            Self {
-                name: String::from(name),
-                content: Vec::new(),
-                is_dir: false,
-                children: BTreeMap::new(),
-            }
-        }
-
-        pub fn new_dir(name: &str) -> Self {
-            Self {
-                name: String::from(name),
-                content: Vec::new(),
-                is_dir: true,
-                children: BTreeMap::new(),
-            }
-        }
-    }
-
-    pub struct RamFS {
-        root: File,
-    }
-
-    impl RamFS {
-        pub fn new() -> Self {
-            let mut root = File::new_dir("/");
-            
-            let mut readme = File::new_file("README.TXT");
-            readme.content = b"Welcome to ReeOS!\nThis is a RAM filesystem.\n".to_vec();
-            root.children.insert(String::from("README.TXT"), readme);
-            
-            let mut hello = File::new_file("HELLO.TXT");
-            hello.content = b"Hello World!\n".to_vec();
-            root.children.insert(String::from("HELLO.TXT"), hello);
-            
-            let docs = File::new_dir("DOCS");
-            root.children.insert(String::from("DOCS"), docs);
-            
-            Self { root }
-        }
-
-        pub fn list_dir(&self, path: &str) -> Vec<String> {
-            let mut current = &self.root;
-            
-            if path != "/" {
-                for part in path.split('/').filter(|p| !p.is_empty()) {
-                    if let Some(child) = current.children.get(part) {
-                        current = child;
-                    } else {
-                        return Vec::new();
-                    }
-                }
-            }
-            
-            let mut result: Vec<String> = current.children.keys().cloned().collect();
-            result.sort();
-            result
-        }
-
-        pub fn read_file(&self, path: &str) -> Option<Vec<u8>> {
-            let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
-            if parts.is_empty() {
-                return None;
-            }
-            
-            let filename = parts.last().unwrap();
-            let dir_path: Vec<&str> = if parts.len() > 1 {
-                parts[..parts.len()-1].to_vec()
-            } else {
-                Vec::new()
-            };
-            
-            let mut current = &self.root;
-            for part in dir_path {
-                if let Some(child) = current.children.get(part) {
-                    current = child;
-                } else {
-                    return None;
-                }
-            }
-            
-            current.children.get(*filename).map(|f| f.content.clone())
-        }
-
-        pub fn create_file(&mut self, path: &str, content: Vec<u8>) -> Result<(), &'static str> {
-            let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
-            if parts.is_empty() {
-                return Err("Invalid path");
-            }
-            
-            let filename = parts.last().unwrap();
-            let dir_path: Vec<&str> = if parts.len() > 1 {
-                parts[..parts.len()-1].to_vec()
-            } else {
-                Vec::new()
-            };
-            
-            let mut current = &mut self.root;
-            for part in dir_path {
-                if let Some(child) = current.children.get_mut(part) {
-                    current = child;
-                } else {
-                    return Err("Directory not found");
-                }
-            }
-            
-            let mut file = File::new_file(filename);
-            file.content = content;
-            current.children.insert(String::from(*filename), file);
-            Ok(())
-        }
-
-        pub fn delete(&mut self, path: &str) -> Result<(), &'static str> {
-            let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
-            if parts.is_empty() {
-                return Err("Invalid path");
-            }
-            
-            let filename = parts.last().unwrap();
-            let dir_path: Vec<&str> = if parts.len() > 1 {
-                parts[..parts.len()-1].to_vec()
-            } else {
-                Vec::new()
-            };
-            
-            let mut current = &mut self.root;
-            for part in dir_path {
-                if let Some(child) = current.children.get_mut(part) {
-                    current = child;
-                } else {
-                    return Err("Directory not found");
-                }
-            }
-            
-            current.children.remove(&String::from(*filename));
-            Ok(())
-        }
-    }
-}
-
-use ramfs::RamFS;
+use alloc::collections::BTreeMap;
 
 #[global_allocator]
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
@@ -185,8 +30,100 @@ fn panic(_info: &PanicInfo) -> ! {
     }
 }
 
+struct PackageManager {
+    installed: BTreeMap<String, String>,
+    available: Vec<String>,
+    initialized: bool,
+}
+
+impl PackageManager {
+    fn new() -> Self {
+        Self {
+            installed: BTreeMap::new(),
+            available: Vec::new(),
+            initialized: false,
+        }
+    }
+    
+    fn init(&mut self) {
+        self.available.push(String::from("base"));
+        self.available.push(String::from("dev"));
+        self.available.push(String::from("game"));
+        self.initialized = true;
+    }
+    
+    fn is_initialized(&self) -> bool {
+        self.initialized
+    }
+    
+    fn install(&mut self, package: &str) -> bool {
+        if !self.initialized {
+            return false;
+        }
+        
+        if self.available.contains(&String::from(package)) {
+            if !self.installed.contains_key(package) {
+                self.installed.insert(String::from(package), String::from("1.0.0"));
+                return true;
+            }
+        }
+        false
+    }
+    
+    fn list_installed(&self) -> Vec<String> {
+        if !self.initialized {
+            return Vec::new();
+        }
+        self.installed.keys().cloned().collect()
+    }
+    
+    fn list_available(&self) -> Vec<String> {
+        if !self.initialized {
+            return Vec::new();
+        }
+        self.available.clone()
+    }
+}
+
+fn show_progress_bar(stdout: &mut uefi::proto::console::text::Output, percent: usize) {
+    write!(stdout, "\r[").unwrap();
+    let filled = percent / 5;
+    let empty = 20 - filled;
+    for _ in 0..filled {
+        write!(stdout, "=").unwrap();
+    }
+    for _ in 0..empty {
+        write!(stdout, " ").unwrap();
+    }
+    write!(stdout, "] {}%", percent).unwrap();
+}
+
+fn simulate_init(stdout: &mut uefi::proto::console::text::Output) {
+    writeln!(stdout, "initializing rpm database...").unwrap();
+    for i in 0..=100 {
+        show_progress_bar(stdout, i);
+        for _ in 0..20000  {
+            core::hint::spin_loop();
+        }
+    }
+    writeln!(stdout).unwrap();
+    writeln!(stdout, "Done!").unwrap();
+}
+
+fn simulate_download(stdout: &mut uefi::proto::console::text::Output, package: &str) {
+    writeln!(stdout, "downloading {}...", package).unwrap();
+    for i in 0..=100 {
+        show_progress_bar(stdout, i);
+        for _ in 0..50000 {
+            core::hint::spin_loop();
+        }
+    }
+    writeln!(stdout).unwrap();
+}
+
 #[entry]
 fn main(_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
+    
     {
         let bs = system_table.boot_services();
         let heap_size = 1024 * 1024;
@@ -203,12 +140,20 @@ fn main(_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
         }
     }
     
-    let mut fs = RamFS::new();
-    
     system_table.stdout().clear().unwrap();
-    writeln!(system_table.stdout(), "<ReeOS> with RAM Filesystem").unwrap();
+    
+    writeln!(system_table.stdout(), "========================================").unwrap();
+    writeln!(system_table.stdout(), "         <ReeOS> ").unwrap();
+    writeln!(system_table.stdout(), "========================================").unwrap();
+    writeln!(system_table.stdout()).unwrap();
     writeln!(system_table.stdout(), "Type 'help' for commands").unwrap();
     writeln!(system_table.stdout()).unwrap();
+    
+    let mut pkg_manager = PackageManager::new();
+    let mut files: Vec<(String, String)> = Vec::new();
+    
+    files.push((String::from("readme.txt"), String::from("Welcome to ReeOS!")));
+    files.push((String::from("hello.txt"), String::from("Hello World!")));
     
     let mut input_buffer = String::new();
     write!(system_table.stdout(), "> ").unwrap();
@@ -229,18 +174,28 @@ fn main(_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
                             
                             match parts.as_slice() {
                                 ["help"] => {
-                                    writeln!(system_table.stdout(), "Available commands:").unwrap();
-                                    writeln!(system_table.stdout(), "  help                - show this help").unwrap();
-                                    writeln!(system_table.stdout(), "  clear               - clear screen").unwrap();
-                                    writeln!(system_table.stdout(), "  echo <text>         - print text").unwrap();
-                                    writeln!(system_table.stdout(), "  ls [path]           - list directory").unwrap();
-                                    writeln!(system_table.stdout(), "  cat <file>          - show file content").unwrap();
-                                    writeln!(system_table.stdout(), "  touch <file> <text> - create file").unwrap();
-                                    writeln!(system_table.stdout(), "  rm <file>           - delete file").unwrap();
-                                    writeln!(system_table.stdout(), "  halt                - stop CPU").unwrap();
+                                    writeln!(system_table.stdout()).unwrap();
+                                    writeln!(system_table.stdout(), "=== system commands ===").unwrap();
+                                    writeln!(system_table.stdout(), "  help, clear, echo, ls, touch, cat, rm").unwrap();
+                                    writeln!(system_table.stdout()).unwrap();
+                                    writeln!(system_table.stdout(), "=== ReeOS Package Manager(rpm) ===").unwrap();
+                                    writeln!(system_table.stdout(), "  rpm init            - Initialize package database").unwrap();
+                                    writeln!(system_table.stdout(), "  rpm install <pkg>   - Install a package").unwrap();
+                                    writeln!(system_table.stdout(), "  rpm remove <pkg>    - Remove a package").unwrap();
+                                    writeln!(system_table.stdout(), "  rpm list            - List installed packages").unwrap();
+                                    writeln!(system_table.stdout(), "  rpm available       - Show available packages").unwrap();
+                                    writeln!(system_table.stdout()).unwrap();
+                                    writeln!(system_table.stdout(), "  halt                - Stop CPU").unwrap();
+                                }
+                                ["info"] =>{
+                                    writeln!(system_table.stdout(), "Version OS: 1.0.6").unwrap();
+                                    writeln!(system_table.stdout(), "Version UEFI").unwrap();
+                                    writeln!(system_table.stdout(), "ReeOS Package Manager(rpm)").unwrap();
+                                    writeln!(system_table.stdout(), "-install additional commands").unwrap();
                                 }
                                 ["clear"] => {
                                     system_table.stdout().clear().unwrap();
+                                    writeln!(system_table.stdout(), "<ReeOS> - Terminal cleared").unwrap();
                                 }
                                 ["halt"] => {
                                     writeln!(system_table.stdout(), "CPU halted").unwrap();
@@ -252,63 +207,106 @@ fn main(_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
                                     writeln!(system_table.stdout(), "{}", rest.join(" ")).unwrap();
                                 }
                                 ["ls"] => {
-                                    let files = fs.list_dir("/");
                                     if files.is_empty() {
                                         writeln!(system_table.stdout(), "(empty)").unwrap();
                                     } else {
-                                        for file in files {
-                                            writeln!(system_table.stdout(), "  {}", file).unwrap();
-                                        }
-                                    }
-                                }
-                                ["ls", path] => {
-                                    let files = fs.list_dir(path);
-                                    if files.is_empty() {
-                                        writeln!(system_table.stdout(), "(empty)").unwrap();
-                                    } else {
-                                        for file in files {
-                                            writeln!(system_table.stdout(), "  {}", file).unwrap();
+                                        writeln!(system_table.stdout(), "Files:").unwrap();
+                                        for (name, _) in &files {
+                                            writeln!(system_table.stdout(), "  - {}", name).unwrap();
                                         }
                                     }
                                 }
                                 ["cat", filename] => {
-                                    match fs.read_file(filename) {
-                                        Some(content) => {
-                                            if let Ok(text) = core::str::from_utf8(&content) {
-                                                write!(system_table.stdout(), "{}", text).unwrap();
-                                            } else {
-                                                writeln!(system_table.stdout(), "(binary file)").unwrap();
-                                            }
+                                    let mut found = false;
+                                    for (name, content) in &files {
+                                        if name == *filename {
+                                            writeln!(system_table.stdout(), "{}", content).unwrap();
+                                            found = true;
+                                            break;
                                         }
-                                        None => {
-                                            writeln!(system_table.stdout(), "File not found: {}", filename).unwrap();
-                                        }
+                                    }
+                                    if !found {
+                                        writeln!(system_table.stdout(), "File not found: {}", filename).unwrap();
                                     }
                                 }
                                 ["touch", filename, content @ ..] => {
-                                    let text = content.join(" ").as_bytes().to_vec();
-                                    match fs.create_file(filename, text) {
-                                        Ok(()) => {
-                                            writeln!(system_table.stdout(), "Created: {}", filename).unwrap();
-                                        }
-                                        Err(e) => {
-                                            writeln!(system_table.stdout(), "Error: {}", e).unwrap();
+                                    let text = content.join(" ");
+                                    files.push((String::from(*filename), text));
+                                    writeln!(system_table.stdout(), "Created: {}", filename).unwrap();
+                                }
+                                ["rm", filename] => {
+                                    if let Some(pos) = files.iter().position(|(n, _)| n == *filename) {
+                                        files.remove(pos);
+                                        writeln!(system_table.stdout(), "Deleted: {}", filename).unwrap();
+                                    } else {
+                                        writeln!(system_table.stdout(), "File not found: {}", filename).unwrap();
+                                    }
+                                }
+                                ["rpm", "init"] => {
+                                    if pkg_manager.is_initialized() {
+                                        writeln!(system_table.stdout(), "RPM already initialized!").unwrap();
+                                    } else {
+                                        simulate_init(system_table.stdout());
+                                        pkg_manager.init();
+                                    }
+                                }
+                                ["rpm", "install", package] => {
+                                    if !pkg_manager.is_initialized() {
+                                        writeln!(system_table.stdout(), "error: RPM not initialized! Run 'rpm init' first.").unwrap();
+                                    } else {
+                                        simulate_download(system_table.stdout(), package);
+                                        if pkg_manager.install(package) {
+                                            writeln!(system_table.stdout(), "succes: Installed {}", package).unwrap();
+                                        } else {
+                                            writeln!(system_table.stdout(), "error: Package not found or already installed").unwrap();
                                         }
                                     }
                                 }
-                                ["rm", filename] => {
-                                    match fs.delete(filename) {
-                                        Ok(()) => {
-                                            writeln!(system_table.stdout(), "Deleted: {}", filename).unwrap();
+                                ["rpm", "remove", package] => {
+                                    if !pkg_manager.is_initialized() {
+                                        writeln!(system_table.stdout(), "error: RPM not initialized! Run 'rpm init' first.").unwrap();
+                                    } else {
+                                        if pkg_manager.installed.remove(&String::from(*package)).is_some() {
+                                            writeln!(system_table.stdout(), "SUCCESS: Removed {}", package).unwrap();
+                                        } else {
+                                            writeln!(system_table.stdout(), "error: Package not installed").unwrap();
                                         }
-                                        Err(e) => {
-                                            writeln!(system_table.stdout(), "Error: {}", e).unwrap();
+                                    }
+                                }
+                                ["rpm", "list"] => {
+                                    if !pkg_manager.is_initialized() {
+                                        writeln!(system_table.stdout(), "error: RPM not initialized! Run 'rpm init' first.").unwrap();
+                                    } else {
+                                        let installed = pkg_manager.list_installed();
+                                        if installed.is_empty() {
+                                            writeln!(system_table.stdout(), "No packages installed").unwrap();
+                                        } else {
+                                            writeln!(system_table.stdout(), "Installed packages:").unwrap();
+                                            for pkg in installed {
+                                                writeln!(system_table.stdout(), "  - {} v1.0.0", pkg).unwrap();
+                                            }
+                                        }
+                                    }
+                                }
+                                ["rpm", "available"] => {
+                                    if !pkg_manager.is_initialized() {
+                                        writeln!(system_table.stdout(), "error: RPM not initialized! Run 'rpm init' first.").unwrap();
+                                    } else {
+                                        writeln!(system_table.stdout(), "Available packages:").unwrap();
+                                        for pkg in pkg_manager.list_available() {
+                                            let status = if pkg_manager.installed.contains_key(&pkg) {
+                                                "[installed]"
+                                            } else {
+                                                ""
+                                            };
+                                            writeln!(system_table.stdout(), "  - {} {}", pkg, status).unwrap();
                                         }
                                     }
                                 }
                                 [""] => {}
                                 [cmd, ..] => {
                                     writeln!(system_table.stdout(), "Unknown command: '{}'", cmd).unwrap();
+                                    writeln!(system_table.stdout(), "Type 'help' for available commands").unwrap();
                                 }
                                 [] => {}
                             }
@@ -316,7 +314,7 @@ fn main(_handle: Handle, mut system_table: SystemTable<Boot>) -> Status {
                             input_buffer.clear();
                             write!(system_table.stdout(), "> ").unwrap();
                         }
-                        0x0008 => { 
+                        0x0008 => {
                             if !input_buffer.is_empty() {
                                 input_buffer.pop();
                                 write!(system_table.stdout(), "\x08 \x08").unwrap();
