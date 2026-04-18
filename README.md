@@ -15,3 +15,4 @@ like this
 wget https://retrage.github.io/edk2-nightly/bin/RELEASEX64_OVMF.fd
 mv RELEASEX64_OVMF.fd OVMF.fd
 ```
+but this is not necessary if everything works for you without downloading
